@@ -52,12 +52,6 @@ cargo build --release
 ./target/release/shatters-relay --config deploy/config.toml
 ```
 
-### Test
-
-```bash
-cargo test
-```
-
 ## Configuration
 
 All settings are configured via a single TOML file. Every field has a sensible default.
