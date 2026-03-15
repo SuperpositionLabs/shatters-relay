@@ -16,7 +16,7 @@
 
 ---
 
-The relay server behind [shatters](https://github.com/SuperpositionLabs). Routes encrypted messages between clients without the ability to read, decrypt, or infer their contents. All payloads are opaque ciphertext. All routing keys are 32-byte hashes with no metadata attached. The server holds no user accounts, no keys, no plaintext by design, not by policy.
+The relay server behind [shatters](https://github.com/SuperpositionLabs/shatters). Routes encrypted messages between clients without the ability to read, decrypt, or infer their contents. All payloads are opaque ciphertext. All routing keys are 32-byte hashes with no metadata attached. The server holds no user accounts, no keys, no plaintext by design, not by policy.
 
 ## Features
 
