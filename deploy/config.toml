@@ -1,0 +1,28 @@
+[server]
+listen_addr = "127.0.0.1:4433"
+
+cert_path = "certs/server.crt"
+key_path = "certs/server.key"
+
+max_idle_timeout_secs = 300
+keep_alive_interval_secs = 30
+
+[deaddrop]
+default_ttl_secs = 86_400
+max_per_drop = 1_000
+cleanup_interval_secs = 60
+
+[prekey]
+bundle_ttl_secs = 604_800
+max_prekeys_per_user = 100
+max_bundle_size_bytes = 4096
+cleanup_interval_secs = 300
+
+[limits]
+max_subscriptions_per_conn = 50
+requests_per_second = 100
+burst_size = 200
+
+[logging]
+level = "info"
+format = "json"
