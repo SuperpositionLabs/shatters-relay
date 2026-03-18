@@ -1,12 +1,10 @@
 [server]
 listen_addr = "127.0.0.1:4433"
 
-cert_path = "certs/server.crt"
-key_path = "certs/server.key"
+tls_cert_path = "certs/server.crt"
+tls_key_path = "certs/server.key"
 
 max_idle_timeout_secs = 300
-keep_alive_interval_secs = 30
-
 [deaddrop]
 default_ttl_secs = 86_400
 max_per_drop = 1_000
