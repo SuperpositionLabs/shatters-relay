@@ -185,7 +185,7 @@ async fn dispatch(
         }
 
         MessageType::UploadBundle => {
-            match ctx.prekeys.upload(msg.payload) {
+            match ctx.prekeys.upload(msg.channel, msg.payload) {
                 Ok(()) => {
                     tracing::debug!(sub_id = ctx.sub_id, "prekey bundle uploaded");
                     ctx.send_reply(Message::ack(msg.id));
@@ -198,7 +198,7 @@ async fn dispatch(
         }
 
         MessageType::FetchBundle => {
-            match ctx.prekeys.fetch(&msg.payload) {
+            match ctx.prekeys.fetch(&msg.channel) {
                 Some(bundle) => {
                     let bundle_msg = Message {
                         msg_type: MessageType::BundleData,

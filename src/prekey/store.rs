@@ -4,22 +4,12 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 
 use crate::config::PreKeyConfig;
+use crate::protocol::message::Channel;
 
-const IK_OFFSET: usize  = 0;
-const IK_SIZE:   usize  = 32;
 const OPK_COUNT_OFFSET: usize = 128;
 const OPK_START: usize = 130;
 const OPK_SIZE:  usize = 32;
 const MIN_BUNDLE_SIZE: usize = OPK_START;
-
-fn address_from_bundle(bundle: &[u8]) -> Option<[u8; IK_SIZE]> {
-    if bundle.len() < MIN_BUNDLE_SIZE {
-        return None;
-    }
-    let mut key = [0u8; IK_SIZE];
-    key.copy_from_slice(&bundle[IK_OFFSET..IK_OFFSET + IK_SIZE]);
-    Some(key)
-}
 
 fn opk_count(bundle: &[u8]) -> usize {
     if bundle.len() < OPK_START {
@@ -50,7 +40,7 @@ fn consume_one_opk(bundle: &[u8]) -> Vec<u8> {
     out
 }
 
-type AddressKey = [u8; IK_SIZE];
+type ChannelKey = Channel;
 
 struct StoredBundle {
     data:      Vec<u8>,
@@ -58,7 +48,7 @@ struct StoredBundle {
 }
 
 pub struct PreKeyStore {
-    bundles: DashMap<AddressKey, StoredBundle>,
+    bundles: DashMap<ChannelKey, StoredBundle>,
     config:  PreKeyConfig,
 }
 
@@ -70,7 +60,7 @@ impl PreKeyStore {
         })
     }
 
-    pub fn upload(&self, bundle_data: Vec<u8>) -> Result<(), &'static str> {
+    pub fn upload(&self, channel: Channel, bundle_data: Vec<u8>) -> Result<(), &'static str> {
         if bundle_data.len() < MIN_BUNDLE_SIZE {
             return Err("bundle too small");
         }
@@ -88,10 +78,7 @@ impl PreKeyStore {
             return Err("bundle length inconsistent with OPK count");
         }
 
-        let address = address_from_bundle(&bundle_data)
-            .ok_or("invalid bundle: cannot extract address")?;
-
-        self.bundles.insert(address, StoredBundle {
+        self.bundles.insert(channel, StoredBundle {
             data: bundle_data,
             stored_at: Instant::now(),
         });
@@ -100,14 +87,8 @@ impl PreKeyStore {
         Ok(())
     }
 
-    pub fn fetch(&self, address: &[u8]) -> Option<Vec<u8>> {
-        if address.len() != IK_SIZE {
-            return None;
-        }
-        let mut key = [0u8; IK_SIZE];
-        key.copy_from_slice(address);
-
-        let mut entry = self.bundles.get_mut(&key)?;
+    pub fn fetch(&self, channel: &Channel) -> Option<Vec<u8>> {
+        let mut entry = self.bundles.get_mut(channel)?;
         let bundle = &mut entry.value_mut();
 
         let response = bundle.data.clone();
