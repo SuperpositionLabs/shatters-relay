@@ -11,6 +11,9 @@ pub enum TlsError {
     #[error("no private key found in pem file")]
     NoPrivateKey,
 
+    #[error("tls certificate files required but not found")]
+    CertRequired,
+
     #[error("certificate generation failed: {0}")]
     CertGen(#[from] rcgen::Error),
 }
@@ -18,12 +21,16 @@ pub enum TlsError {
 pub fn load_credentials(
     cert_path: &Path,
     key_path: &Path,
+    allow_self_signed: bool,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), TlsError> {
     if !cert_path.exists() || !key_path.exists() {
+        if !allow_self_signed {
+            return Err(TlsError::CertRequired);
+        }
         tracing::warn!(
             cert = ?cert_path,
             key = ?key_path,
-            "tls files not found, generating self-signed certificate"
+            "tls files not found, generating self-signed certificate (dev mode)"
         );
         return generate_self_signed();
     }

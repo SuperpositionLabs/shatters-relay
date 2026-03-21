@@ -32,6 +32,7 @@ pub struct ServerConfig {
     
     pub tls_cert_path: PathBuf,
     pub tls_key_path: PathBuf,
+    pub allow_self_signed_tls: bool,
     
     pub max_auth_timeout_secs: u64,
     pub max_idle_timeout_secs: u64,
@@ -41,6 +42,7 @@ pub struct ServerConfig {
 pub struct DeadDropConfig {
     pub default_ttl_secs: u64,
     pub max_per_drop: usize,
+    pub max_channels: usize,
     pub cleanup_interval_secs: u64,
 }
 
@@ -58,6 +60,7 @@ impl Default for ServerConfig {
             
             tls_cert_path: "cert.pem".into(),
             tls_key_path:  "key.pem".into(),
+            allow_self_signed_tls: false,
             
             max_auth_timeout_secs: 10,
             max_idle_timeout_secs: 30,
@@ -70,6 +73,7 @@ impl Default for DeadDropConfig {
         Self {
             default_ttl_secs: 86_400,
             max_per_drop: 1_000,
+            max_channels: 100_000,
             cleanup_interval_secs: 60,
         }
     }
@@ -105,6 +109,8 @@ impl Default for PreKeyConfig {
 #[serde(default)]
 pub struct LimitsConfig {
     pub max_subscriptions_per_conn: usize,
+    pub max_connections: usize,
+    pub max_total_channels: usize,
     pub requests_per_second: u32,
     pub burst_size: u32,
 }
@@ -113,6 +119,8 @@ impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
             max_subscriptions_per_conn: 50,
+            max_connections: 10_000,
+            max_total_channels: 100_000,
             requests_per_second: 100,
             burst_size: 200,
         }

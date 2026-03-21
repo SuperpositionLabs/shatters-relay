@@ -53,7 +53,11 @@ impl DeadDropStore {
         })
     }
 
-    pub fn store(&self, channel: &Channel, raw: Vec<u8>) -> Vec<u8> {
+    pub fn store(&self, channel: &Channel, raw: Vec<u8>) -> Result<Vec<u8>, &'static str> {
+        if !self.drops.contains_key(channel) && self.drops.len() >= self.config.max_channels {
+            return Err("deaddrop channel limit reached");
+        }
+
         let data = inject_timestamp(raw);
 
         let envelope = StoredEnvelope {
@@ -70,7 +74,7 @@ impl DeadDropStore {
         }
 
         tracing::trace!(stored = q.len(), "envelope stored");
-        data
+        Ok(data)
     }
 
     pub fn retrieve(&self, channel: &Channel, max_age: Duration) -> Vec<Vec<u8>> {
@@ -132,10 +136,12 @@ impl DeadDropStore {
         });
     }
 
+    #[allow(dead_code)]
     pub fn channel_count(&self) -> usize {
         self.drops.len()
     }
 
+    #[allow(dead_code)]
     pub fn total_envelopes(&self) -> usize {
         self.drops.iter().map(|e| e.value().lock().len()).sum()
     }

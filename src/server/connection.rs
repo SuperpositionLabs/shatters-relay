@@ -5,6 +5,7 @@ use quinn::Connection;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
+use crate::auth::AuthState;
 use crate::config::LimitsConfig;
 use crate::deaddrop::store::DeadDropStore;
 use crate::prekey::store::PreKeyStore;
@@ -34,6 +35,7 @@ struct ConnectionCtx {
     store:       Arc<DeadDropStore>,
     prekeys:     Arc<PreKeyStore>,
     limiter:     TokenBucket,
+    auth_timeout_secs: u64,
 }
 
 impl ConnectionCtx {
@@ -46,11 +48,12 @@ impl ConnectionCtx {
 }
 
 pub async fn handle(
-    conn:     Connection,
-    router:   Arc<Router>,
-    store:    Arc<DeadDropStore>,
-    prekeys:  Arc<PreKeyStore>,
-    limits:   LimitsConfig,
+    conn:          Connection,
+    router:        Arc<Router>,
+    store:         Arc<DeadDropStore>,
+    prekeys:       Arc<PreKeyStore>,
+    limits:        LimitsConfig,
+    auth_timeout:  u64,
 ) -> Result<(), ConnectionError> {
     let remote = conn.remote_address();
     let (send, recv) = conn.accept_bi().await?;
@@ -67,6 +70,7 @@ pub async fn handle(
         store,
         prekeys,
         limiter: TokenBucket::new(limits.requests_per_second, limits.burst_size),
+        auth_timeout_secs: auth_timeout,
     };
 
     let writer_handle = tokio::spawn(writer_task(send, outbound_rx));
@@ -104,6 +108,8 @@ async fn reader_loop(
     mut recv: quinn::RecvStream,
     ctx:      &ConnectionCtx,
 ) -> Result<(), ConnectionError> {
+    let mut auth = AuthState::new();
+
     loop {
         let frame = match quic::read_frame(&mut recv).await {
             Ok(f)  => f,
@@ -127,71 +133,40 @@ async fn reader_loop(
             continue;
         }
 
-        if let Err(e) = dispatch(msg, ctx).await {
+        if let Err(e) = dispatch(msg, ctx, &mut auth).await {
             tracing::warn!(sub_id = ctx.sub_id, error = %e, "dispatch error");
         }
     }
 }
 
 async fn dispatch(
-    msg: Message,
-    ctx: &ConnectionCtx,
+    msg:  Message,
+    ctx:  &ConnectionCtx,
+    auth: &mut AuthState,
 ) -> Result<(), ConnectionError> {
     match msg.msg_type {
-        MessageType::Publish => {
-            let payload = ctx.store.store(&msg.channel, msg.payload);
-            ctx.router.publish(&msg.channel, &payload).await;
-            ctx.send_reply(Message::ack(msg.id));
-        }
+        /* --- open operations --------------------------------------- */
 
-        MessageType::Subscribe => {
-            match ctx.router
-                .subscribe(&msg.channel, ctx.sub_id, ctx.outbound_tx.clone())
-                .await
-            {
-                Ok(()) => ctx.send_reply(Message::ack(msg.id)),
+        MessageType::Authenticate => {
+            match auth.authenticate(&msg.payload, ctx.auth_timeout_secs) {
+                Ok(()) => {
+                    tracing::info!(sub_id = ctx.sub_id, "client authenticated");
+                    ctx.send_reply(Message::ack(msg.id));
+                }
                 Err(reason) => {
-                    tracing::warn!(sub_id = ctx.sub_id, reason, "subscription rejected");
+                    tracing::warn!(sub_id = ctx.sub_id, reason, "auth rejected");
                     ctx.send_reply(Message::nack(msg.id, reason));
                 }
             }
         }
 
-        MessageType::Unsubscribe => {
-            ctx.router.unsubscribe(&msg.channel, ctx.sub_id).await;
-            ctx.send_reply(Message::ack(msg.id));
-        }
-
-        MessageType::Retrieve => {
-            let ttl = parse_ttl(&msg.payload);
-            let envelopes = ctx.store.retrieve(&msg.channel, ttl);
-
-            tracing::debug!(
-                count = envelopes.len(),
-                ttl_secs = ttl.as_secs(),
-                "retrieve"
-            );
-
-            for env_data in envelopes {
-                let data_msg = Message::data(
-                    ctx.router.alloc_msg_id(),
-                    msg.channel,
-                    env_data,
-                );
-                ctx.send_reply(data_msg);
-            }
-
-            ctx.send_reply(Message::ack(msg.id));
-        }
-
-        MessageType::UploadBundle => {
-            match ctx.prekeys.upload(msg.channel, msg.payload) {
-                Ok(()) => {
-                    tracing::debug!(sub_id = ctx.sub_id, "prekey bundle uploaded");
+        MessageType::Publish => {
+            match ctx.store.store(&msg.channel, msg.payload) {
+                Ok(payload) => {
+                    ctx.router.publish(&msg.channel, &payload).await;
                     ctx.send_reply(Message::ack(msg.id));
                 }
                 Err(reason) => {
-                    tracing::warn!(sub_id = ctx.sub_id, reason, "prekey upload rejected");
                     ctx.send_reply(Message::nack(msg.id, reason));
                 }
             }
@@ -215,6 +190,87 @@ async fn dispatch(
             }
         }
 
+        /* --- privileged operations ----------------------------------- */
+
+        MessageType::Subscribe => {
+            if let Err(reason) = auth.verify_channel_proof(&msg.channel, &msg.payload) {
+                ctx.send_reply(Message::nack(msg.id, reason));
+                return Ok(());
+            }
+
+            match ctx.router
+                .subscribe(&msg.channel, ctx.sub_id, ctx.outbound_tx.clone())
+                .await
+            {
+                Ok(()) => ctx.send_reply(Message::ack(msg.id)),
+                Err(reason) => {
+                    tracing::warn!(sub_id = ctx.sub_id, reason, "subscription rejected");
+                    ctx.send_reply(Message::nack(msg.id, reason));
+                }
+            }
+        }
+
+        MessageType::Unsubscribe => {
+            if !auth.is_authenticated() {
+                ctx.send_reply(Message::nack(msg.id, "not authenticated"));
+                return Ok(());
+            }
+            ctx.router.unsubscribe(&msg.channel, ctx.sub_id).await;
+            ctx.send_reply(Message::ack(msg.id));
+        }
+
+        MessageType::Retrieve => {
+            let inner = match auth.verify_channel_proof(&msg.channel, &msg.payload) {
+                Ok(inner) => inner,
+                Err(reason) => {
+                    ctx.send_reply(Message::nack(msg.id, reason));
+                    return Ok(());
+                }
+            };
+
+            let ttl = parse_ttl(inner);
+            let envelopes = ctx.store.retrieve(&msg.channel, ttl);
+
+            tracing::debug!(
+                count = envelopes.len(),
+                ttl_secs = ttl.as_secs(),
+                "retrieve"
+            );
+
+            for env_data in envelopes {
+                let data_msg = Message::data(
+                    ctx.router.alloc_msg_id(),
+                    msg.channel,
+                    env_data,
+                );
+                ctx.send_reply(data_msg);
+            }
+
+            ctx.send_reply(Message::ack(msg.id));
+        }
+
+        MessageType::UploadBundle => {
+            let inner = match auth.verify_channel_proof(&msg.channel, &msg.payload) {
+                Ok(inner) => inner,
+                Err(reason) => {
+                    tracing::warn!(sub_id = ctx.sub_id, reason, "upload auth failed");
+                    ctx.send_reply(Message::nack(msg.id, reason));
+                    return Ok(());
+                }
+            };
+
+            match ctx.prekeys.upload(msg.channel, inner.to_vec()) {
+                Ok(()) => {
+                    tracing::debug!(sub_id = ctx.sub_id, "prekey bundle uploaded");
+                    ctx.send_reply(Message::ack(msg.id));
+                }
+                Err(reason) => {
+                    tracing::warn!(sub_id = ctx.sub_id, reason, "prekey upload rejected");
+                    ctx.send_reply(Message::nack(msg.id, reason));
+                }
+            }
+        }
+
         _ => {
             tracing::debug!(
                 sub_id = ctx.sub_id,
@@ -227,10 +283,6 @@ async fn dispatch(
     Ok(())
 }
 
-// ---- helpers ------------------------------------------------------------
-
-/// Parse the TTL hint from a Retrieve payload (4 bytes BE seconds).
-/// Falls back to 24 h if the payload is too short or zero.
 fn parse_ttl(payload: &[u8]) -> Duration {
     const DEFAULT_TTL: Duration = Duration::from_secs(86_400);
 

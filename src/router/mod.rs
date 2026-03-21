@@ -22,20 +22,22 @@ pub struct Router {
     next_msg_id: AtomicU32,
 
     max_subscriptions: usize,
+    max_channels: usize,
 }
 
 impl Router {
     pub fn new() -> Arc<Self> {
-        Self::with_limits(50)
+        Self::with_limits(50, 100_000)
     }
 
-    pub fn with_limits(max_subscriptions_per_conn: usize) -> Arc<Self> {
+    pub fn with_limits(max_subscriptions_per_conn: usize, max_channels: usize) -> Arc<Self> {
         Arc::new(Self {
             channels: DashMap::new(),
             sub_counts: DashMap::new(),
             next_id: AtomicU64::new(1),
             next_msg_id: AtomicU32::new(1),
             max_subscriptions: max_subscriptions_per_conn,
+            max_channels,
         })
     }
 
@@ -56,6 +58,10 @@ impl Router {
         let count = self.sub_counts.get(&sub_id).map(|c| *c).unwrap_or(0);
         if count >= self.max_subscriptions {
             return Err("subscription limit reached");
+        }
+
+        if !self.channels.contains_key(channel) && self.channels.len() >= self.max_channels {
+            return Err("channel limit reached");
         }
 
         let mut subs = self.channels.entry(*channel).or_default();

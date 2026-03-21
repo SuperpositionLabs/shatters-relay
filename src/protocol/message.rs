@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+pub const PROTOCOL_VERSION: u8 = 1;
 pub const CHANNEL_SIZE: usize = 32;
 pub type Channel = [u8; CHANNEL_SIZE];
 
@@ -12,6 +13,7 @@ pub enum MessageType {
     Retrieve      = 0x04,
     UploadBundle  = 0x05,
     FetchBundle   = 0x06,
+    Authenticate  = 0x07,
     Ack           = 0x10,
     Nack          = 0x11,
     Data          = 0x20,
@@ -27,6 +29,7 @@ impl MessageType {
             0x04 => Ok(Self::Retrieve),
             0x05 => Ok(Self::UploadBundle),
             0x06 => Ok(Self::FetchBundle),
+            0x07 => Ok(Self::Authenticate),
             0x10 => Ok(Self::Ack),
             0x11 => Ok(Self::Nack),
             0x20 => Ok(Self::Data),
@@ -37,13 +40,14 @@ impl MessageType {
 
     pub fn token_cost(&self) -> u32 {
         match self {
-            Self::Publish      => 3,
-            Self::UploadBundle => 3,
-            Self::Subscribe    => 2,
-            Self::Retrieve     => 2,
-            Self::FetchBundle  => 2,
-            Self::Unsubscribe  => 1,
-            _                  => 1,
+            Self::Publish       => 3,
+            Self::UploadBundle  => 3,
+            Self::Authenticate  => 3,
+            Self::Subscribe     => 2,
+            Self::Retrieve      => 2,
+            Self::FetchBundle   => 2,
+            Self::Unsubscribe   => 1,
+            _                   => 1,
         }
     }
 }
@@ -85,9 +89,10 @@ impl Message {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        let total = 1 + 4 + CHANNEL_SIZE + self.payload.len();
+        let total = 1 + 1 + 4 + CHANNEL_SIZE + self.payload.len();
 
         let mut buf = Vec::with_capacity(total);
+        buf.push(PROTOCOL_VERSION);
         buf.push(self.msg_type as u8);
         buf.extend_from_slice(&self.id.to_be_bytes());
         buf.extend_from_slice(&self.channel);
@@ -96,7 +101,7 @@ impl Message {
     }
 
     pub fn deserialize(data: &[u8]) -> Result<Self, ProtocolError> {
-        const MIN_HEADER: usize = 1 + 4 + CHANNEL_SIZE;
+        const MIN_HEADER: usize = 1 + 1 + 4 + CHANNEL_SIZE; // version + type + id + channel
 
         if data.len() < MIN_HEADER {
             return Err(ProtocolError::TooShort {
@@ -105,13 +110,18 @@ impl Message {
             });
         }
 
-        let msg_type = MessageType::from_byte(data[0])?;
-        let id = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
+        let version = data[0];
+        if version != PROTOCOL_VERSION {
+            return Err(ProtocolError::UnsupportedVersion(version));
+        }
+
+        let msg_type = MessageType::from_byte(data[1])?;
+        let id = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
 
         let mut channel = [0u8; CHANNEL_SIZE];
-        channel.copy_from_slice(&data[5..5 + CHANNEL_SIZE]);
+        channel.copy_from_slice(&data[6..6 + CHANNEL_SIZE]);
 
-        let payload = data[5 + CHANNEL_SIZE..].to_vec();
+        let payload = data[6 + CHANNEL_SIZE..].to_vec();
 
         Ok(Self {
             msg_type,
@@ -126,6 +136,9 @@ impl Message {
 pub enum ProtocolError {
     #[error("message too short: need {need}, got {got}")]
     TooShort { need: usize, got: usize },
+
+    #[error("unsupported protocol version: {0}")]
+    UnsupportedVersion(u8),
 
     #[error("invalid message type: 0x{0:02x}")]
     InvalidMessageType(u8),
@@ -148,6 +161,7 @@ mod tests {
             payload: vec![0xCA, 0xFE],
         };
         let wire = msg.serialize();
+        assert_eq!(wire[0], PROTOCOL_VERSION);
         let decoded = Message::deserialize(&wire).unwrap();
         assert_eq!(decoded.msg_type, MessageType::Publish);
         assert_eq!(decoded.id, 42);
@@ -177,20 +191,31 @@ mod tests {
 
     #[test]
     fn too_short_returns_error() {
-        assert!(Message::deserialize(&[0x01, 0x00]).is_err());
+        assert!(Message::deserialize(&[PROTOCOL_VERSION, 0x01, 0x00]).is_err());
     }
 
     #[test]
     fn bad_type_returns_error() {
-        let mut bad = vec![0xFF];
+        let mut bad = vec![PROTOCOL_VERSION, 0xFF];
         bad.extend_from_slice(&[0u8; 36]); // id(4) + channel(32)
         assert!(Message::deserialize(&bad).is_err());
     }
 
     #[test]
+    fn unsupported_version() {
+        let mut data = vec![0xFF, 0x01];
+        data.extend_from_slice(&[0u8; 4]);
+        data.extend_from_slice(&[0u8; 32]);
+        assert!(matches!(
+            Message::deserialize(&data),
+            Err(ProtocolError::UnsupportedVersion(0xFF))
+        ));
+    }
+
+    #[test]
     fn exact_min_header() {
-        // 37 bytes: type(1) + id(4) + channel(32), no payload
-        let mut data = vec![0x01]; // Publish
+        // 38 bytes: version(1) + type(1) + id(4) + channel(32), no payload
+        let mut data = vec![PROTOCOL_VERSION, 0x01]; // version + Publish
         data.extend_from_slice(&[0u8; 4]); // id = 0
         data.extend_from_slice(&[0x42u8; 32]); // channel
         let msg = Message::deserialize(&data).unwrap();
@@ -208,6 +233,6 @@ mod tests {
             payload: vec![],
         };
         let wire = msg.serialize();
-        assert_eq!(wire.len(), 37); // 1 + 4 + 32
+        assert_eq!(wire.len(), 38); // version(1) + type(1) + id(4) + channel(32)
     }
 }

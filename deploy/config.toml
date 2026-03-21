@@ -3,11 +3,15 @@ listen_addr = "127.0.0.1:4433"
 
 tls_cert_path = "certs/server.crt"
 tls_key_path = "certs/server.key"
+allow_self_signed_tls = false
 
+max_auth_timeout_secs = 30
 max_idle_timeout_secs = 300
+
 [deaddrop]
 default_ttl_secs = 86_400
 max_per_drop = 1_000
+max_channels = 100_000
 cleanup_interval_secs = 60
 
 [prekey]
@@ -18,6 +22,8 @@ cleanup_interval_secs = 300
 
 [limits]
 max_subscriptions_per_conn = 50
+max_connections = 10_000
+max_total_channels = 100_000
 requests_per_second = 100
 burst_size = 200
 
