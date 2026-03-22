@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+#[cfg(feature = "dev-tls")]
+use rustls::pki_types::PrivatePkcs8KeyDer;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -14,6 +16,7 @@ pub enum TlsError {
     #[error("tls certificate files required but not found")]
     CertRequired,
 
+    #[cfg(feature = "dev-tls")]
     #[error("certificate generation failed: {0}")]
     CertGen(#[from] rcgen::Error),
 }
@@ -27,12 +30,21 @@ pub fn load_credentials(
         if !allow_self_signed {
             return Err(TlsError::CertRequired);
         }
-        tracing::warn!(
-            cert = ?cert_path,
-            key = ?key_path,
-            "tls files not found, generating self-signed certificate (dev mode)"
-        );
-        return generate_self_signed();
+
+        #[cfg(feature = "dev-tls")]
+        {
+            tracing::warn!(
+                cert = ?cert_path,
+                key = ?key_path,
+                "tls files not found, generating self-signed certificate (dev mode)"
+            );
+            return generate_self_signed();
+        }
+
+        #[cfg(not(feature = "dev-tls"))]
+        {
+            return Err(TlsError::CertRequired);
+        }
     }
 
     let cert_pem = std::fs::read(cert_path)?;
@@ -46,6 +58,7 @@ pub fn load_credentials(
     Ok((certs, key))
 }
 
+#[cfg(feature = "dev-tls")]
 fn generate_self_signed() -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), TlsError>
 {
     let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;

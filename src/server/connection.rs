@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,9 +10,9 @@ use crate::auth::AuthState;
 use crate::config::LimitsConfig;
 use crate::deaddrop::store::DeadDropStore;
 use crate::prekey::store::PreKeyStore;
-use crate::protocol::message::{Message, MessageType, ProtocolError};
+use crate::protocol::message::{Message, MessageType, ProtocolError, PROTOCOL_VERSION};
 use crate::ratelimit::TokenBucket;
-use crate::router::{OutboundSender, Router, SubscriberId};
+use crate::router::{OutboundFrame, OutboundSender, Router, SubscriberId};
 use crate::transport::quic::{self, QuicError};
 
 const OUTBOUND_CHANNEL_SIZE: usize = 256;
@@ -36,12 +37,22 @@ struct ConnectionCtx {
     prekeys:     Arc<PreKeyStore>,
     limiter:     TokenBucket,
     auth_timeout_secs: u64,
+    max_payload_size:  usize,
+    max_bytes_per_conn: usize,
+    bytes_in_flight: Arc<AtomicUsize>,
 }
 
 impl ConnectionCtx {
     fn send_reply(&self, msg: Message) {
-        let frame = msg.serialize();
+        let frame = Arc::new(msg.serialize());
+        let len = frame.len();
+        if self.bytes_in_flight.load(Ordering::Relaxed) + len > self.max_bytes_per_conn {
+            tracing::warn!(sub_id = self.sub_id, "per-connection memory budget exceeded, dropping");
+            return;
+        }
+        self.bytes_in_flight.fetch_add(len, Ordering::Relaxed);
         if self.outbound_tx.try_send(frame).is_err() {
+            self.bytes_in_flight.fetch_sub(len, Ordering::Relaxed);
             tracing::warn!(sub_id = self.sub_id, "outbound channel full/closed");
         }
     }
@@ -55,13 +66,14 @@ pub async fn handle(
     limits:        LimitsConfig,
     auth_timeout:  u64,
 ) -> Result<(), ConnectionError> {
-    let remote = conn.remote_address();
     let (send, recv) = conn.accept_bi().await?;
 
     let sub_id = router.next_subscriber_id();
-    tracing::info!(remote = %remote, sub_id, "stream accepted");
+    tracing::info!(sub_id, "stream accepted");
 
-    let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_CHANNEL_SIZE);
+    let (outbound_tx, outbound_rx) = mpsc::channel::<OutboundFrame>(OUTBOUND_CHANNEL_SIZE);
+
+    let bytes_in_flight = Arc::new(AtomicUsize::new(0));
 
     let ctx = ConnectionCtx {
         sub_id,
@@ -71,9 +83,12 @@ pub async fn handle(
         prekeys,
         limiter: TokenBucket::new(limits.requests_per_second, limits.burst_size),
         auth_timeout_secs: auth_timeout,
+        max_payload_size: limits.max_payload_size,
+        max_bytes_per_conn: limits.max_bytes_per_conn,
+        bytes_in_flight: Arc::clone(&bytes_in_flight),
     };
 
-    let writer_handle = tokio::spawn(writer_task(send, outbound_rx));
+    let writer_handle = tokio::spawn(writer_task(send, outbound_rx, bytes_in_flight));
 
     let result = reader_loop(recv, &ctx).await;
 
@@ -84,8 +99,8 @@ pub async fn handle(
     router.remove_subscriber(sub_id).await;
 
     match &result {
-        Ok(()) => tracing::info!(remote = %remote, sub_id, "stream closed cleanly"),
-        Err(e) => tracing::warn!(remote = %remote, sub_id, error = %e, "stream error"),
+        Ok(()) => tracing::info!(sub_id, "stream closed cleanly"),
+        Err(e) => tracing::warn!(sub_id, error = %e, "stream error"),
     }
 
     result
@@ -93,13 +108,17 @@ pub async fn handle(
 
 async fn writer_task(
     mut send: quinn::SendStream,
-    mut rx:   mpsc::Receiver<Vec<u8>>,
+    mut rx:   mpsc::Receiver<OutboundFrame>,
+    bytes_in_flight: Arc<AtomicUsize>,
 ) {
     while let Some(frame) = rx.recv().await {
+        let len = frame.len();
         if let Err(e) = quic::write_frame(&mut send, &frame).await {
             tracing::warn!(error = %e, "write_frame failed, closing writer");
+            bytes_in_flight.fetch_sub(len, Ordering::Relaxed);
             break;
         }
+        bytes_in_flight.fetch_sub(len, Ordering::Relaxed);
     }
     let _ = send.finish();
 }
@@ -119,8 +138,19 @@ async fn reader_loop(
             Err(e) => return Err(e.into()),
         };
 
-        let msg = match Message::deserialize(&frame) {
+        let msg = match Message::deserialize_bounded(&frame, Some(ctx.max_payload_size)) {
             Ok(m)  => m,
+            Err(ProtocolError::UnsupportedVersion(v)) => {
+                tracing::warn!(sub_id = ctx.sub_id, client_version = v, "unsupported protocol version");
+                let reason = format!("unsupported version {v}, server supports {PROTOCOL_VERSION}");
+                ctx.send_reply(Message::nack(0, &reason));
+                continue;
+            }
+            Err(ProtocolError::PayloadTooLarge { size, max }) => {
+                tracing::warn!(sub_id = ctx.sub_id, size, max, "payload too large");
+                ctx.send_reply(Message::nack(0, "payload too large"));
+                continue;
+            }
             Err(e) => {
                 tracing::warn!(sub_id = ctx.sub_id, error = %e, "bad message, skipping");
                 continue;
@@ -161,7 +191,15 @@ async fn dispatch(
         }
 
         MessageType::Publish => {
-            match ctx.store.store(&msg.channel, msg.payload) {
+            let inner = match auth.verify_channel_proof(&msg.channel, &msg.payload) {
+                Ok(inner) => inner,
+                Err(reason) => {
+                    ctx.send_reply(Message::nack(msg.id, reason));
+                    return Ok(());
+                }
+            };
+
+            match ctx.store.store(&msg.channel, inner.to_vec()) {
                 Ok(payload) => {
                     ctx.router.publish(&msg.channel, &payload).await;
                     ctx.send_reply(Message::ack(msg.id));
@@ -173,6 +211,11 @@ async fn dispatch(
         }
 
         MessageType::FetchBundle => {
+            if !auth.is_authenticated() {
+                ctx.send_reply(Message::nack(msg.id, "not authenticated"));
+                return Ok(());
+            }
+
             match ctx.prekeys.fetch(&msg.channel) {
                 Some(bundle) => {
                     let bundle_msg = Message {

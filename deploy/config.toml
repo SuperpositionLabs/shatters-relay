@@ -2,31 +2,49 @@
 listen_addr = "127.0.0.1:4433"
 
 tls_cert_path = "certs/server.crt"
-tls_key_path = "certs/server.key"
-allow_self_signed_tls = false
+tls_key_path  = "certs/server.key"
+allow_self_signed_tls = true
 
-max_auth_timeout_secs = 30
+max_auth_timeout_secs = 10
 max_idle_timeout_secs = 300
 
 [deaddrop]
-default_ttl_secs = 86_400
-max_per_drop = 1_000
-max_channels = 100_000
+default_ttl_secs      = 86_400       # 1 day
+max_per_drop          = 1_000
+max_channels          = 100_000
+max_total_bytes       = 536_870_912  # 512 mb
 cleanup_interval_secs = 60
 
 [prekey]
-bundle_ttl_secs = 604_800
+bundle_ttl_secs      = 604_800  # 7 days
 max_prekeys_per_user = 100
 max_bundle_size_bytes = 4096
 cleanup_interval_secs = 300
 
 [limits]
-max_subscriptions_per_conn = 50
-max_connections = 10_000
-max_total_channels = 100_000
-requests_per_second = 100
-burst_size = 200
+max_subscriptions_per_conn  = 50
+max_connections             = 10_000
+max_connections_per_ip      = 50
+max_total_channels          = 100_000
+max_payload_size            = 65_536      # 64 kb
+max_bytes_per_conn          = 8_388_608   # 8 mb
+requests_per_second         = 100
+burst_size                  = 200
+slow_consumer_drop_threshold = 10
 
 [logging]
-level = "info"
-format = "json"
+level  = "info"
+format = "pretty"
+
+[persistence]
+enabled           = false
+data_dir          = "data"
+sync_writes       = true
+max_db_size_bytes = 1_073_741_824  # 1 gb
+
+[metrics]
+enabled     = false
+listen_addr = "127.0.0.1:9090"
+
+[shutdown]
+drain_timeout_secs = 30

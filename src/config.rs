@@ -23,6 +23,9 @@ pub struct RelayConfig {
     pub prekey: PreKeyConfig,
     pub limits: LimitsConfig,
     pub logging: LoggingConfig,
+    pub persistence: PersistenceConfig,
+    pub metrics: MetricsConfig,
+    pub shutdown: ShutdownConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -39,10 +42,12 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct DeadDropConfig {
     pub default_ttl_secs: u64,
     pub max_per_drop: usize,
     pub max_channels: usize,
+    pub max_total_bytes: usize,
     pub cleanup_interval_secs: u64,
 }
 
@@ -74,6 +79,7 @@ impl Default for DeadDropConfig {
             default_ttl_secs: 86_400,
             max_per_drop: 1_000,
             max_channels: 100_000,
+            max_total_bytes: 512 * 1024 * 1024,
             cleanup_interval_secs: 60,
         }
     }
@@ -110,9 +116,13 @@ impl Default for PreKeyConfig {
 pub struct LimitsConfig {
     pub max_subscriptions_per_conn: usize,
     pub max_connections: usize,
+    pub max_connections_per_ip: usize,
     pub max_total_channels: usize,
+    pub max_payload_size: usize,
+    pub max_bytes_per_conn: usize,
     pub requests_per_second: u32,
     pub burst_size: u32,
+    pub slow_consumer_drop_threshold: usize,
 }
 
 impl Default for LimitsConfig {
@@ -120,9 +130,13 @@ impl Default for LimitsConfig {
         Self {
             max_subscriptions_per_conn: 50,
             max_connections: 10_000,
+            max_connections_per_ip: 50,
             max_total_channels: 100_000,
+            max_payload_size: 65_536,
+            max_bytes_per_conn: 8 * 1024 * 1024,
             requests_per_second: 100,
             burst_size: 200,
+            slow_consumer_drop_threshold: 10,
         }
     }
 }
@@ -136,5 +150,55 @@ impl RelayConfig {
         let contents = std::fs::read_to_string(path)?;
         let config: RelayConfig = toml::from_str(&contents)?;
         Ok(config)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PersistenceConfig {
+    pub enabled: bool,
+    pub data_dir: PathBuf,
+    pub sync_writes: bool,
+    pub max_db_size_bytes: usize,
+}
+
+impl Default for PersistenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            data_dir: "data".into(),
+            sync_writes: true,
+            max_db_size_bytes: 1024 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct MetricsConfig {
+    pub enabled: bool,
+    pub listen_addr: String,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_addr: "127.0.0.1:9090".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ShutdownConfig {
+    pub drain_timeout_secs: u64,
+}
+
+impl Default for ShutdownConfig {
+    fn default() -> Self {
+        Self {
+            drain_timeout_secs: 30,
+        }
     }
 }

@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -42,6 +43,8 @@ fn inject_timestamp(mut data: Vec<u8>) -> Vec<u8> {
 
 pub struct DeadDropStore {
     drops:  DashMap<Channel, Mutex<VecDeque<StoredEnvelope>>>,
+    channel_count: AtomicUsize,
+    total_bytes:   AtomicUsize,
     config: DeadDropConfig,
 }
 
@@ -49,16 +52,34 @@ impl DeadDropStore {
     pub fn new(config: DeadDropConfig) -> Arc<Self> {
         Arc::new(Self {
             drops: DashMap::new(),
+            channel_count: AtomicUsize::new(0),
+            total_bytes: AtomicUsize::new(0),
             config,
         })
     }
 
     pub fn store(&self, channel: &Channel, raw: Vec<u8>) -> Result<Vec<u8>, &'static str> {
-        if !self.drops.contains_key(channel) && self.drops.len() >= self.config.max_channels {
-            return Err("deaddrop channel limit reached");
+        let is_new = !self.drops.contains_key(channel);
+        if is_new {
+            let prev = self.channel_count.fetch_add(1, Ordering::AcqRel);
+            if prev >= self.config.max_channels {
+                self.channel_count.fetch_sub(1, Ordering::Release);
+                return Err("deaddrop channel limit reached");
+            }
         }
 
         let data = inject_timestamp(raw);
+        let data_len = data.len();
+
+        // Check total bytes budget
+        let prev_bytes = self.total_bytes.fetch_add(data_len, Ordering::AcqRel);
+        if prev_bytes + data_len > self.config.max_total_bytes {
+            self.total_bytes.fetch_sub(data_len, Ordering::Release);
+            if is_new {
+                self.channel_count.fetch_sub(1, Ordering::Release);
+            }
+            return Err("deaddrop storage limit reached");
+        }
 
         let envelope = StoredEnvelope {
             data:      data.clone(),
@@ -70,7 +91,9 @@ impl DeadDropStore {
         q.push_back(envelope);
 
         while q.len() > self.config.max_per_drop {
-            q.pop_front();
+            if let Some(evicted) = q.pop_front() {
+                self.total_bytes.fetch_sub(evicted.data.len(), Ordering::Release);
+            }
         }
 
         tracing::trace!(stored = q.len(), "envelope stored");
@@ -102,11 +125,14 @@ impl DeadDropStore {
         };
 
         let mut empty_channels: Vec<Channel> = Vec::new();
+        let mut freed_bytes: usize = 0;
 
         for entry in self.drops.iter() {
             let mut q = entry.value().lock();
             while q.front().map_or(false, |e| e.stored_at < cutoff) {
-                q.pop_front();
+                if let Some(evicted) = q.pop_front() {
+                    freed_bytes += evicted.data.len();
+                }
             }
             if q.is_empty() {
                 empty_channels.push(*entry.key());
@@ -115,11 +141,17 @@ impl DeadDropStore {
 
         let evicted = empty_channels.len();
         for ch in &empty_channels {
-            self.drops.remove_if(ch, |_, q| q.lock().is_empty());
+            if self.drops.remove_if(ch, |_, q| q.lock().is_empty()).is_some() {
+                self.channel_count.fetch_sub(1, Ordering::Release);
+            }
+        }
+
+        if freed_bytes > 0 {
+            self.total_bytes.fetch_sub(freed_bytes, Ordering::Release);
         }
 
         if evicted > 0 {
-            tracing::debug!(evicted_channels = evicted, "deaddrop cleanup complete");
+            tracing::debug!(evicted_channels = evicted, freed_bytes, "deaddrop cleanup complete");
         }
     }
 

@@ -101,7 +101,11 @@ impl Message {
     }
 
     pub fn deserialize(data: &[u8]) -> Result<Self, ProtocolError> {
-        const MIN_HEADER: usize = 1 + 1 + 4 + CHANNEL_SIZE; // version + type + id + channel
+        Self::deserialize_bounded(data, None)
+    }
+
+    pub fn deserialize_bounded(data: &[u8], max_payload: Option<usize>) -> Result<Self, ProtocolError> {
+        const MIN_HEADER: usize = 1 + 1 + 4 + CHANNEL_SIZE;
 
         if data.len() < MIN_HEADER {
             return Err(ProtocolError::TooShort {
@@ -120,6 +124,16 @@ impl Message {
 
         let mut channel = [0u8; CHANNEL_SIZE];
         channel.copy_from_slice(&data[6..6 + CHANNEL_SIZE]);
+
+        let payload_size = data.len() - (6 + CHANNEL_SIZE);
+        if let Some(max) = max_payload {
+            if payload_size > max {
+                return Err(ProtocolError::PayloadTooLarge {
+                    size: payload_size,
+                    max,
+                });
+            }
+        }
 
         let payload = data[6 + CHANNEL_SIZE..].to_vec();
 
@@ -142,6 +156,9 @@ pub enum ProtocolError {
 
     #[error("invalid message type: 0x{0:02x}")]
     InvalidMessageType(u8),
+
+    #[error("payload too large: {size} bytes (max {max})")]
+    PayloadTooLarge { size: usize, max: usize },
 }
 
 #[cfg(test)]
@@ -197,7 +214,7 @@ mod tests {
     #[test]
     fn bad_type_returns_error() {
         let mut bad = vec![PROTOCOL_VERSION, 0xFF];
-        bad.extend_from_slice(&[0u8; 36]); // id(4) + channel(32)
+        bad.extend_from_slice(&[0u8; 36]);
         assert!(Message::deserialize(&bad).is_err());
     }
 
@@ -214,10 +231,9 @@ mod tests {
 
     #[test]
     fn exact_min_header() {
-        // 38 bytes: version(1) + type(1) + id(4) + channel(32), no payload
-        let mut data = vec![PROTOCOL_VERSION, 0x01]; // version + Publish
-        data.extend_from_slice(&[0u8; 4]); // id = 0
-        data.extend_from_slice(&[0x42u8; 32]); // channel
+        let mut data = vec![PROTOCOL_VERSION, 0x01];
+        data.extend_from_slice(&[0u8; 4]);
+        data.extend_from_slice(&[0x42u8; 32]);
         let msg = Message::deserialize(&data).unwrap();
         assert_eq!(msg.msg_type, MessageType::Publish);
         assert_eq!(msg.channel, [0x42u8; 32]);
@@ -233,6 +249,6 @@ mod tests {
             payload: vec![],
         };
         let wire = msg.serialize();
-        assert_eq!(wire.len(), 38); // version(1) + type(1) + id(4) + channel(32)
+        assert_eq!(wire.len(), 38);
     }
 }
