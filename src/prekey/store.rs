@@ -8,7 +8,7 @@ use crate::protocol::message::Channel;
 
 const OPK_COUNT_OFFSET: usize = 128;
 const OPK_START: usize = 130;
-const OPK_SIZE:  usize = 32;
+const OPK_ENTRY_SIZE: usize = 4 + 32; // id(4) + pubkey(32)
 const MIN_BUNDLE_SIZE: usize = OPK_START;
 
 fn opk_count(bundle: &[u8]) -> usize {
@@ -28,12 +28,12 @@ fn consume_one_opk(bundle: &[u8]) -> Vec<u8> {
     }
 
     let new_count = count - 1;
-    let mut out = Vec::with_capacity(OPK_START + new_count * OPK_SIZE);
+    let mut out = Vec::with_capacity(OPK_START + new_count * OPK_ENTRY_SIZE);
     out.extend_from_slice(&bundle[..OPK_COUNT_OFFSET]);
     out.push((new_count >> 8) as u8);
     out.push((new_count & 0xFF) as u8);
 
-    let remaining_start = OPK_START + OPK_SIZE;
+    let remaining_start = OPK_START + OPK_ENTRY_SIZE;
     if remaining_start <= bundle.len() {
         out.extend_from_slice(&bundle[remaining_start..]);
     }
@@ -73,7 +73,7 @@ impl PreKeyStore {
             return Err("too many one-time prekeys");
         }
 
-        let expected_len = OPK_START + count * OPK_SIZE;
+        let expected_len = OPK_START + count * OPK_ENTRY_SIZE;
         if bundle_data.len() != expected_len {
             return Err("bundle length inconsistent with OPK count");
         }
