@@ -201,7 +201,7 @@ async fn dispatch(
 
             match ctx.store.store(&msg.channel, inner.to_vec()) {
                 Ok(payload) => {
-                    ctx.router.publish(&msg.channel, &payload).await;
+                    ctx.router.publish(&msg.channel, &payload, Some(ctx.sub_id)).await;
                     ctx.send_reply(Message::ack(msg.id));
                 }
                 Err(reason) => {
@@ -242,7 +242,13 @@ async fn dispatch(
             }
 
             match ctx.router
-                .subscribe(&msg.channel, ctx.sub_id, ctx.outbound_tx.clone())
+                .subscribe(
+                    &msg.channel,
+                    ctx.sub_id,
+                    ctx.outbound_tx.clone(),
+                    Arc::clone(&ctx.bytes_in_flight),
+                    ctx.max_bytes_per_conn,
+                )
                 .await
             {
                 Ok(()) => ctx.send_reply(Message::ack(msg.id)),

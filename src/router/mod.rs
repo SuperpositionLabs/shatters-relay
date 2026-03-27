@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -11,9 +11,11 @@ pub type OutboundFrame = Arc<Vec<u8>>;
 pub type OutboundSender = mpsc::Sender<OutboundFrame>;
 
 struct Subscriber {
-    id:         SubscriberId,
-    sender:     OutboundSender,
-    drop_count: AtomicU32,
+    id:              SubscriberId,
+    sender:          OutboundSender,
+    drop_count:      AtomicU32,
+    bytes_in_flight: Arc<AtomicUsize>,
+    max_bytes:       usize,
 }
 
 pub struct Router {
@@ -64,6 +66,8 @@ impl Router {
         channel: &Channel,
         sub_id:  SubscriberId,
         sender:  OutboundSender,
+        bytes_in_flight: Arc<AtomicUsize>,
+        max_bytes: usize,
     ) -> Result<(), &'static str> {
         let count = self.sub_counts.get(&sub_id).map(|c| *c).unwrap_or(0);
         if count >= self.max_subscriptions {
@@ -86,6 +90,8 @@ impl Router {
                 id: sub_id,
                 sender,
                 drop_count: AtomicU32::new(0),
+                bytes_in_flight,
+                max_bytes,
             });
             *self.sub_counts.entry(sub_id).or_insert(0) += 1;
             tracing::debug!(sub_id, "subscriber added");
@@ -124,6 +130,7 @@ impl Router {
         &self,
         channel: &Channel,
         payload: &[u8],
+        exclude: Option<SubscriberId>,
     ) -> usize {
         let data_msg = Message::data(
             self.alloc_msg_id(),
@@ -142,12 +149,22 @@ impl Router {
         let mut to_evict = Vec::new();
 
         for (idx, sub) in subs.iter().enumerate() {
+            if exclude == Some(sub.id) {
+                continue;
+            }
+            let len = frame.len();
+            if sub.bytes_in_flight.load(Ordering::Relaxed) + len > sub.max_bytes {
+                sub.drop_count.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            sub.bytes_in_flight.fetch_add(len, Ordering::Relaxed);
             match sub.sender.try_send(Arc::clone(&frame)) {
                 Ok(()) => {
                     sub.drop_count.store(0, Ordering::Relaxed);
                     delivered += 1;
                 }
                 Err(mpsc::error::TrySendError::Full(_)) => {
+                    sub.bytes_in_flight.fetch_sub(len, Ordering::Relaxed);
                     let drops = sub.drop_count.fetch_add(1, Ordering::Relaxed) + 1;
                     if threshold > 0 && drops >= threshold {
                         tracing::warn!(
@@ -164,6 +181,7 @@ impl Router {
                     }
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
+                    sub.bytes_in_flight.fetch_sub(len, Ordering::Relaxed);
                     tracing::debug!(
                         sub_id = sub.id,
                         "subscriber channel closed"
