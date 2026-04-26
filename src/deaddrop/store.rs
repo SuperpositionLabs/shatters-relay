@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -12,33 +12,6 @@ use crate::config::DeadDropConfig;
 struct StoredEnvelope {
     data:       Vec<u8>,
     stored_at:  Instant,
-}
-
-const DEADDROP_ID_SIZE: usize = 32;
-const TIMESTAMP_SIZE:   usize = 8;
-const HEADER_SIZE:      usize = DEADDROP_ID_SIZE + TIMESTAMP_SIZE;
-
-fn inject_timestamp(mut data: Vec<u8>) -> Vec<u8> {
-    if data.len() < HEADER_SIZE {
-        return data;
-    }
-
-    let ts_offset = DEADDROP_ID_SIZE;
-    let ts = u64::from_be_bytes(
-        data[ts_offset..ts_offset + TIMESTAMP_SIZE]
-            .try_into()
-            .unwrap(),
-    );
-
-    if ts == 0 {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        data[ts_offset..ts_offset + TIMESTAMP_SIZE].copy_from_slice(&now_ms.to_be_bytes());
-    }
-
-    data
 }
 
 pub struct DeadDropStore {
@@ -68,7 +41,11 @@ impl DeadDropStore {
             }
         }
 
-        let data = inject_timestamp(raw);
+        // Payloads are end-to-end encrypted blobs; the relay treats them as
+        // opaque. We deliberately do NOT mutate the payload (e.g. injecting a
+        // timestamp into it would corrupt any wire format whose bytes at the
+        // mutated offset happen to be zero, such as fresh ratchet headers).
+        let data = raw;
         let data_len = data.len();
 
         // Check total bytes budget
